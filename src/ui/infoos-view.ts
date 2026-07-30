@@ -234,6 +234,39 @@ export class InfoOSView extends ItemView {
   private renderConnection(body: HTMLElement): void {
     body.createDiv({ cls: "infoos-summary", text: "连接信息在 Obsidian 设置 → Markdown Card Viewer 中编辑。测试只验证 cards:read，并报告 assets:read；不会请求 captures:write。" });
     this.button(body, this.busy ? "测试中…" : "测试连接", () => this.run(() => this.plugin.testInfoOSConnection()));
+    const header = body.createDiv({ cls: "infoos-log-header" });
+    const logs = this.plugin.getInfoOSRequestLog();
+    header.createEl("h3", { text: `本会话请求日志（${logs.length}）` });
+    const controls = header.createDiv({ cls: "infoos-log-controls" });
+    this.button(controls, "刷新日志", () => this.render());
+    const clear = this.button(controls, "清空日志", () => {
+      this.plugin.clearInfoOSRequestLog();
+      this.status = "已清空本会话请求日志。";
+      this.render();
+    });
+    clear.disabled = this.busy || logs.length === 0;
+    body.createDiv({
+      cls: "infoos-log-note",
+      text: "仅保留当前 Obsidian 会话最近 100 条；不记录 Token、请求正文、主机、卡片/资产 ID、查询值或错误原文。"
+    });
+    if (!logs.length) {
+      body.createDiv({ cls: "infoos-empty infoos-log-empty", text: "还没有 InfoOS 请求。测试连接、刷新目录或读取资产后可在这里查看。" });
+      return;
+    }
+    const list = body.createDiv({ cls: "infoos-log-list" });
+    for (const entry of logs) {
+      const row = list.createDiv({ cls: "infoos-log-row" });
+      const title = row.createDiv({ cls: "infoos-log-title" });
+      title.createEl("strong", { text: `${entry.method} ${entry.route}` });
+      title.createSpan({
+        cls: `infoos-log-outcome is-${entry.outcome}`,
+        text: requestOutcome(entry.outcome)
+      });
+      row.createDiv({
+        cls: "infoos-meta",
+        text: `${new Date(entry.timestamp).toLocaleTimeString()} · ${entry.status == null ? "无响应" : `HTTP ${entry.status}`} · ${entry.durationMs} ms`
+      });
+    }
   }
 
   private async audit(body: HTMLElement): Promise<void> {
@@ -301,3 +334,6 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : "InfoOS 操作失败。"; }
+function requestOutcome(outcome: "success" | "http_error" | "network_error"): string {
+  return outcome === "success" ? "成功" : outcome === "http_error" ? "HTTP 错误" : "网络错误";
+}

@@ -847,6 +847,17 @@
   border-radius: var(--radius-s);
   background: var(--background-secondary);
 }
+.infoos-log-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 24px; }
+.infoos-log-header h3 { margin: 0; }
+.infoos-log-controls { display: flex; gap: 8px; }
+.infoos-log-note { margin: 8px 0 12px; color: var(--text-muted); font-size: var(--font-ui-small); }
+.infoos-log-list { display: grid; gap: 7px; }
+.infoos-log-row { padding: 10px 12px; border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); background: var(--background-secondary); }
+.infoos-log-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; overflow-wrap: anywhere; }
+.infoos-log-outcome { flex: 0 0 auto; font-size: var(--font-ui-smaller); color: var(--text-muted); }
+.infoos-log-outcome.is-success { color: var(--text-success); }
+.infoos-log-outcome.is-http_error, .infoos-log-outcome.is-network_error { color: var(--text-error); }
+.infoos-log-empty { padding-block: 28px; }
 
 @media (max-width: 620px) {
   .infoos-header, .infoos-tabs, .infoos-body { padding-left: 12px; padding-right: 12px; }

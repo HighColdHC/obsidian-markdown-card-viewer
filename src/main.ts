@@ -1,6 +1,11 @@
 import { MarkdownRenderChild, Menu, Notice, Plugin, TFile, TFolder, requestUrl } from "obsidian";
 import { InfoOSClient, supportsCatalogFilter, type HttpRequester } from "./infoos/client";
 import { InfoOSPluginError, type InfoOSCardCatalogItem, type InfoOSCatalogFilters } from "./infoos/contracts";
+import {
+  appendInfoOSRequestLog,
+  sanitizeInfoOSRequestLogRoute,
+  type InfoOSRequestLogEntry
+} from "./infoos/request-log";
 import { InfoOSSyncEngine } from "./infoos/sync-engine";
 import {
   InfoOSVaultMaterializer,
@@ -26,6 +31,7 @@ export default class MarkdownCardViewerPlugin extends Plugin implements Settings
   private refreshTimer: number | null = null;
   private fileRefreshTimer: number | null = null;
   private readonly pendingFileRefreshes = new Map<string, TFile>();
+  private infoOSRequestLog: InfoOSRequestLogEntry[] = [];
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -107,6 +113,14 @@ export default class MarkdownCardViewerPlugin extends Plugin implements Settings
     const result = await this.createInfoOSClient().testConnection();
     const assets = result.capabilities.includes("assets:read") ? "，服务支持附件读取" : "";
     return `连接成功：InfoOS ${result.interfaceVersion}，cards:read 已验证${assets}。`;
+  }
+
+  getInfoOSRequestLog(): readonly InfoOSRequestLogEntry[] {
+    return [...this.infoOSRequestLog].reverse();
+  }
+
+  clearInfoOSRequestLog(): void {
+    this.infoOSRequestLog = [];
   }
 
   getInfoOSScope() {
@@ -196,26 +210,52 @@ export default class MarkdownCardViewerPlugin extends Plugin implements Settings
 
   private createInfoOSClient(): InfoOSClient {
     const requester: HttpRequester = async (request) => {
-      const response = await requestUrl(request);
-      let json: unknown = null;
+      const startedAt = Date.now();
+      const route = sanitizeInfoOSRequestLogRoute(request.url);
       try {
-        json = response.json;
+        const response = await requestUrl(request);
+        let json: unknown = null;
+        try {
+          json = response.json;
+        } catch {
+          json = null;
+        }
+        this.recordInfoOSRequest({
+          timestamp: new Date(startedAt).toISOString(),
+          method: request.method,
+          route,
+          status: response.status,
+          durationMs: Date.now() - startedAt,
+          outcome: response.status >= 200 && response.status < 400 ? "success" : "http_error"
+        });
+        return {
+          status: response.status,
+          headers: response.headers,
+          arrayBuffer: response.arrayBuffer,
+          json,
+          text: response.text
+        };
       } catch {
-        json = null;
+        this.recordInfoOSRequest({
+          timestamp: new Date(startedAt).toISOString(),
+          method: request.method,
+          route,
+          status: null,
+          durationMs: Date.now() - startedAt,
+          outcome: "network_error"
+        });
+        throw new InfoOSPluginError("network_error", "InfoOS 请求失败，请检查网络和服务状态。");
       }
-      return {
-        status: response.status,
-        headers: response.headers,
-        arrayBuffer: response.arrayBuffer,
-        json,
-        text: response.text
-      };
     };
     return new InfoOSClient(
       this.settings.infoOSBaseUrl,
       this.settings.infoOSToken,
       requester
     );
+  }
+
+  private recordInfoOSRequest(entry: InfoOSRequestLogEntry): void {
+    this.infoOSRequestLog = appendInfoOSRequestLog(this.infoOSRequestLog, entry);
   }
 
   private createInfoOSEngine(

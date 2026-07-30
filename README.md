@@ -39,6 +39,8 @@ InfoOS/
 
 Token 保存在当前 Vault 的本地插件数据文件中。插件不会把 Token 写入日志或 Markdown。
 
+`InfoOS → 连接` 页面可以查看当前 Obsidian 会话最近 100 条脱敏请求日志。日志只包含时间、HTTP 方法、脱敏路由、状态码和耗时，不保存 Token、正文、主机、卡片/资产 ID、查询值或错误原文；重启 Obsidian 后自动清空。
+
 ## 开发验证
 
 ```bash
