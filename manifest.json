@@ -1,0 +1,9 @@
+{
+  "id": "markdown-card-viewer",
+  "name": "Markdown Card Viewer",
+  "version": "0.5.0",
+  "minAppVersion": "1.8.0",
+  "description": "View Markdown as cards and selectively materialize InfoOS cards and offline assets.",
+  "author": "King",
+  "isDesktopOnly": true
+}

@@ -1,0 +1,32 @@
+{
+  "name": "obsidian-markdown-card-viewer",
+  "version": "0.5.0",
+  "private": true,
+  "description": "Obsidian Markdown card viewer with selective InfoOS materialization",
+  "author": "King",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HighColdHC/obsidian-markdown-card-viewer.git"
+  },
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc --noEmit && node esbuild.config.mjs production",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "check:readonly": "node scripts/check-readonly.mjs",
+    "check:write-boundary": "node scripts/check-readonly.mjs",
+    "verify": "npm run check:write-boundary && npm run test:run && npm run build",
+    "package:release": "npm run build && node scripts/package-release.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "esbuild": "^0.28.1",
+    "jsdom": "^29.0.0",
+    "obsidian": "^1.13.1",
+    "playwright": "^1.61.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.0"
+  }
+}

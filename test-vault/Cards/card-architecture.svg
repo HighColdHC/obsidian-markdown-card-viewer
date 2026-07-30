@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="420" viewBox="0 0 960 420">
+  <rect width="960" height="420" fill="#171a20"/>
+  <rect x="70" y="120" width="220" height="160" rx="16" fill="#242932" stroke="#9b8afb" stroke-width="3"/>
+  <rect x="370" y="120" width="220" height="160" rx="16" fill="#242932" stroke="#78a8ff" stroke-width="3"/>
+  <rect x="670" y="120" width="220" height="160" rx="16" fill="#242932" stroke="#68c7a2" stroke-width="3"/>
+  <path d="M290 200h80M590 200h80" stroke="#8f98a8" stroke-width="4"/>
+  <text x="180" y="192" fill="#edf0f5" font-family="system-ui" font-size="28" text-anchor="middle">Markdown</text>
+  <text x="180" y="228" fill="#8f98a8" font-family="system-ui" font-size="18" text-anchor="middle">truth source</text>
+  <text x="480" y="192" fill="#edf0f5" font-family="system-ui" font-size="28" text-anchor="middle">Card view</text>
+  <text x="480" y="228" fill="#8f98a8" font-family="system-ui" font-size="18" text-anchor="middle">read only</text>
+  <text x="780" y="192" fill="#edf0f5" font-family="system-ui" font-size="28" text-anchor="middle">Layout</text>
+  <text x="780" y="228" fill="#8f98a8" font-family="system-ui" font-size="18" text-anchor="middle">graph · grid · list</text>
+</svg>

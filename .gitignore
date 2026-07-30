@@ -1,0 +1,17 @@
+node_modules/
+main.js
+dist/
+*.map
+.DS_Store
+.claude/
+output/
+prototype/
+docs/archive/
+docs/decisions/
+docs/research/
+docs/product/2026-07-16-local-card-workbench-requirements.md
+test-vault/.obsidian/workspace*.json
+test-vault/.obsidian/plugins/
+test-vault/InfoOS E2E/
+test-vault/Scale/
+test-artifacts/
