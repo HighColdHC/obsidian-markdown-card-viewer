@@ -207,7 +207,10 @@ function capabilities() {
     card_schema: "infoos.information-card.v1",
     capabilities: ["cards:read", "assets:read"],
     default_page_size: 100,
-    max_page_size: 200
+    max_page_size: 200,
+    source_schema: "infoos.source-catalog.v1",
+    catalog_filters: ["query", "platform", "completeness", "media_kind", "source_id"],
+    web_deep_links: false
   };
 }
 
@@ -225,6 +228,7 @@ function catalogItem(cardId: string): Record<string, unknown> {
     status: "active",
     completeness_status: "complete",
     excerpt: "摘要",
+    source_id: "source-rss",
     asset_summary: {
       image_count: 1,
       video_count: 0,

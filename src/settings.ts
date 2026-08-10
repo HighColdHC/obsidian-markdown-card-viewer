@@ -71,7 +71,7 @@ export class CardViewerSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("连接")
-      .setDesc("测试会验证 cards:read 并报告 assets:read；目录刷新与收下操作在 InfoOS 标签页完成。")
+      .setDesc("测试会验证 cards:read 并报告 assets:read；脱敏请求日志可在 InfoOS → 连接中查看。")
       .addButton((button) => button
         .setButtonText("测试连接")
         .onClick(async () => {

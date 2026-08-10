@@ -35,6 +35,26 @@ export type InfoOSCapabilities = {
   capabilities: string[];
   default_page_size: number;
   max_page_size: number;
+  source_schema: string;
+  source_catalog_fields?: string[];
+  catalog_filters: string[];
+  catalog_fields?: string[];
+  web_deep_links: boolean;
+};
+
+export type InfoOSSourceCatalogItem = {
+  source_id: string;
+  display_name: string;
+  platform: string;
+  source_type: string;
+  card_count: number;
+  latest_card_updated_at: string | null;
+};
+
+export type InfoOSSourceCatalogResponse = {
+  schema: "infoos.source-catalog.v1";
+  items: InfoOSSourceCatalogItem[];
+  next_page_token: string | null;
 };
 
 export type InfoOSHealth = {
@@ -72,6 +92,8 @@ export type InfoOSCardCatalogItem = {
   completeness_status: string | null;
   excerpt: string | null;
   asset_summary: InfoOSAssetSummary;
+  /** Optional only for persisted pre-source records; current API responses include it. */
+  source_id?: string | null;
 };
 
 export type InfoOSCardCatalogResponse = {
@@ -161,6 +183,17 @@ export type InfoOSCatalogCache = {
   refreshedAt: string | null;
 };
 
+export type InfoOSSourceSubscription = {
+  mode: "all" | "selected";
+  selectedSourceIds: string[];
+  catalog: Record<string, InfoOSSourceCatalogItem>;
+  order: string[];
+  refreshedAt: string | null;
+  sourceApiBaseUrl: string | null;
+  vaultId: string | null;
+  targetFolder: string | null;
+};
+
 export type InfoOSSyncState = {
   entries: Record<string, InfoOSSyncEntry>;
   /** Optional only while v1 plugin settings are migrated; every v2 write includes it. */
@@ -170,6 +203,9 @@ export type InfoOSSyncState = {
   /** Optional only while v1 plugin settings are migrated; every v2 write includes it. */
   vaultId?: string | null;
   targetFolder: string | null;
+  /** Persisted once so old installs do not silently change from all to selected. */
+  sourceSubscriptionDefaultMode?: "all" | "selected";
+  sourceSubscription?: InfoOSSourceSubscription;
 };
 
 export type InfoOSSelectiveState = InfoOSSyncState & {
@@ -189,5 +225,6 @@ export const EMPTY_INFOOS_SYNC_STATE: InfoOSSelectiveState = {
   lastCompletedAt: null,
   sourceApiBaseUrl: null,
   vaultId: null,
-  targetFolder: null
+  targetFolder: null,
+  sourceSubscriptionDefaultMode: "selected"
 };

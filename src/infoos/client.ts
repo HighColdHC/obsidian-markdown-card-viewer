@@ -8,6 +8,8 @@ import {
   type InfoOSCardDetail,
   type InfoOSCatalogFilters,
   type InfoOSHealth,
+  type InfoOSSourceCatalogItem,
+  type InfoOSSourceCatalogResponse,
   type InfoOSPluginErrorCode
 } from "./contracts";
 import { normalizeInfoOSApiBaseUrl } from "./url-policy";
@@ -29,11 +31,17 @@ export type HttpResponse = {
 
 export type HttpRequester = (request: HttpRequest) => Promise<HttpResponse>;
 
+type InfoOSCatalogCapabilityAdvertisement = {
+  capabilities: readonly string[];
+  catalog_filters?: readonly string[];
+};
+
 export type ListCardsOptions = {
   pageSize?: number;
   pageToken?: string | null;
   filters?: InfoOSCatalogFilters;
-  capabilities?: readonly string[] | InfoOSCapabilities;
+  capabilities?: readonly string[] | InfoOSCatalogCapabilityAdvertisement;
+  sourceIds?: readonly string[];
 };
 
 export class InfoOSRequestError extends InfoOSPluginError {
@@ -88,15 +96,35 @@ export class InfoOSClient {
     const query = new URLSearchParams({ page_size: String(pageSize) });
     if (options.pageToken) query.set("page_token", options.pageToken);
     const filters = options.filters;
-    const capabilities = capabilityNames(options.capabilities);
+    const capabilities = options.capabilities ?? [];
     addSupportedFilter(query, "query", filters?.query, capabilities);
     addSupportedFilter(query, "platform", filters?.platform, capabilities);
     addSupportedFilter(query, "completeness", filters?.completeness, capabilities);
     addSupportedFilter(query, "media_kind", filters?.mediaKind, capabilities);
+    if (supportsSourceFilter(options.capabilities)) {
+      const sourceIds = uniqueSourceIds(options.sourceIds);
+      if (sourceIds.length > 100) {
+        throw new InfoOSPluginError("invalid_config", "单次卡片请求最多支持 100 个信息源。");
+      }
+      sourceIds.forEach((sourceId) => query.append("source_id", sourceId));
+    }
     return parseCatalog(await this.requestJson(`/cards?${query.toString()}`, signal));
   }
 
   async listAllCards(options: Omit<ListCardsOptions, "pageToken"> = {}, signal?: AbortSignal):
+  Promise<InfoOSCardCatalogItem[]> {
+    const sourceIds = supportsSourceFilter(options.capabilities) ? uniqueSourceIds(options.sourceIds) : [];
+    if (options.sourceIds?.length && sourceIds.length === 0) return [];
+    const batches = sourceIds.length ? chunk(sourceIds, 100) : [[]];
+    const cards = new Map<string, InfoOSCardCatalogItem>();
+    for (const sourceBatch of batches) {
+      const pages = await this.listAllCardsForSourceBatch({ ...options, sourceIds: sourceBatch }, signal);
+      pages.forEach((card) => cards.set(card.card_id, card));
+    }
+    return [...cards.values()].sort(compareCatalogOrder);
+  }
+
+  private async listAllCardsForSourceBatch(options: Omit<ListCardsOptions, "pageToken">, signal?: AbortSignal):
   Promise<InfoOSCardCatalogItem[]> {
     const cards: InfoOSCardCatalogItem[] = [];
     const seenCursors = new Set<string>();
@@ -113,6 +141,32 @@ export class InfoOSClient {
       }
     } while (cursor);
     return cards;
+  }
+
+  async listSources(options: { pageSize?: number; pageToken?: string | null } = {}, signal?: AbortSignal): Promise<InfoOSSourceCatalogResponse> {
+    const pageSize = options.pageSize ?? 200;
+    if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 200) {
+      throw new InfoOSPluginError("invalid_config", "信息源分页大小必须是 1 到 200 的整数。");
+    }
+    const query = new URLSearchParams({ page_size: String(pageSize) });
+    if (options.pageToken) query.set("page_token", options.pageToken);
+    return parseSourceCatalog(await this.requestJson(`/sources?${query.toString()}`, signal));
+  }
+
+  async listAllSources(options: { pageSize?: number } = {}, signal?: AbortSignal): Promise<InfoOSSourceCatalogItem[]> {
+    const sources = new Map<string, InfoOSSourceCatalogItem>();
+    const seenCursors = new Set<string>();
+    let cursor: string | null = null;
+    do {
+      const page = await this.listSources({ ...options, pageToken: cursor }, signal);
+      page.items.forEach((source) => sources.set(source.source_id, source));
+      cursor = page.next_page_token;
+      if (cursor) {
+        if (seenCursors.has(cursor)) throw new InfoOSRequestError("invalid_response", "InfoOS 返回了重复信息源分页游标。");
+        seenCursors.add(cursor);
+      }
+    } while (cursor);
+    return [...sources.values()];
   }
 
   async getCard(cardId: string, signal?: AbortSignal): Promise<InfoOSCardDetail> {
@@ -237,11 +291,17 @@ export class InfoOSClient {
  * and the exact field; broad read capabilities never enable filter transmission.
  */
 export function supportsCatalogFilter(
-  capabilities: readonly string[],
+  capabilities: readonly string[] | InfoOSCatalogCapabilityAdvertisement,
   field: "query" | "platform" | "completeness" | "media_kind"
 ): boolean {
+  if ("catalog_filters" in capabilities && capabilities.catalog_filters?.includes(field)) {
+    return true;
+  }
+  const capabilityNames = "capabilities" in capabilities
+    ? capabilities.capabilities
+    : capabilities;
   const wanted = field === "media_kind" ? ["media", "kind"] : [field];
-  return capabilities.some((capability) => {
+  return capabilityNames.some((capability) => {
     const segments = capability.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
     return (segments.includes("cards") || segments.includes("card") || segments.includes("catalog"))
       && (segments.includes("filter") || segments.includes("filters"))
@@ -249,21 +309,26 @@ export function supportsCatalogFilter(
   });
 }
 
+export function supportsSourceFilter(
+  capabilities: readonly string[] | InfoOSCatalogCapabilityAdvertisement | undefined
+): boolean {
+  return capabilities != null
+    && "catalog_filters" in capabilities
+    && capabilities.catalog_filters?.includes("source_id") === true;
+}
+
+export function supportsWebDeepLinks(capabilities: InfoOSCapabilities): boolean {
+  return capabilities.web_deep_links === true;
+}
+
 function addSupportedFilter(
   query: URLSearchParams,
   name: "query" | "platform" | "completeness" | "media_kind",
   value: string | undefined,
-  capabilities: readonly string[]
+  capabilities: readonly string[] | InfoOSCatalogCapabilityAdvertisement
 ): void {
   const trimmed = value?.trim();
   if (trimmed && supportsCatalogFilter(capabilities, name)) query.set(name, trimmed);
-}
-
-function capabilityNames(
-  value: readonly string[] | InfoOSCapabilities | undefined
-): readonly string[] {
-  if (value == null) return [];
-  return "capabilities" in value ? value.capabilities : value;
 }
 
 function mapErrorResponse(response: HttpResponse): InfoOSRequestError {
@@ -318,7 +383,12 @@ function parseCapabilities(value: unknown): InfoOSCapabilities {
     || typeof value.card_schema !== "string"
     || !isStringArray(value.capabilities)
     || typeof value.default_page_size !== "number"
-    || typeof value.max_page_size !== "number") {
+    || typeof value.max_page_size !== "number"
+    || typeof value.source_schema !== "string"
+    || !optionalStringArray(value, "source_catalog_fields")
+    || !isStringArray(value.catalog_filters)
+    || !optionalStringArray(value, "catalog_fields")
+    || typeof value.web_deep_links !== "boolean") {
     throw new InfoOSRequestError("invalid_response", "InfoOS capabilities 响应结构无效。");
   }
   return value as InfoOSCapabilities;
@@ -369,6 +439,9 @@ function parseCatalogItem(value: unknown, strictExtendedFields = false): InfoOSC
   const sourceUrl = nullableRecordString(value, "source_url");
   const completeness = nullableRecordString(value, "completeness_status");
   const excerpt = nullableRecordString(value, "excerpt");
+  if (!(value.source_id === null || typeof value.source_id === "string")) {
+    throw new InfoOSRequestError("invalid_response", "InfoOS 卡片信息源字段无效。");
+  }
   return {
     card_id: value.card_id,
     card_type: value.card_type,
@@ -382,7 +455,32 @@ function parseCatalogItem(value: unknown, strictExtendedFields = false): InfoOSC
     status: value.status,
     completeness_status: completeness,
     excerpt,
-    asset_summary: parseAssetSummary(value.asset_summary)
+    asset_summary: parseAssetSummary(value.asset_summary),
+    source_id: value.source_id
+  };
+}
+
+function parseSourceCatalog(value: unknown): InfoOSSourceCatalogResponse {
+  if (!isRecord(value) || value.schema !== "infoos.source-catalog.v1" || !Array.isArray(value.items)
+    || !(value.next_page_token === null || typeof value.next_page_token === "string")) {
+    throw new InfoOSRequestError("invalid_response", "InfoOS 信息源目录响应结构无效。");
+  }
+  return { schema: value.schema, items: value.items.map(parseSourceCatalogItem), next_page_token: value.next_page_token };
+}
+
+function parseSourceCatalogItem(value: unknown): InfoOSSourceCatalogItem {
+  if (!isRecord(value) || typeof value.source_id !== "string" || !isResponseIdentifier(value.source_id)
+    || typeof value.display_name !== "string" || typeof value.platform !== "string" || typeof value.source_type !== "string"
+    || !isNonNegativeInteger(value.card_count) || !(value.latest_card_updated_at === null || typeof value.latest_card_updated_at === "string")) {
+    throw new InfoOSRequestError("invalid_response", "InfoOS 信息源目录项结构无效。");
+  }
+  return {
+    source_id: value.source_id,
+    display_name: value.display_name,
+    platform: value.platform,
+    source_type: value.source_type,
+    card_count: value.card_count,
+    latest_card_updated_at: value.latest_card_updated_at
   };
 }
 
@@ -574,6 +672,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function optionalStringArray(value: Record<string, unknown>, key: string): boolean { return !(key in value) || isStringArray(value[key]); }
+function uniqueSourceIds(ids: readonly string[] | undefined): string[] {
+  return [...new Set((ids ?? []).map((id) => id.trim()).filter((id) => id && !/[\u0000-\u001f/?#\\]/.test(id)))].sort((a, b) => a.localeCompare(b));
+}
+function chunk<T>(items: readonly T[], size: number): T[][] { return Array.from({ length: Math.ceil(items.length / size) }, (_, index) => items.slice(index * size, (index + 1) * size)); }
+
+function compareCatalogOrder(a: InfoOSCardCatalogItem, b: InfoOSCardCatalogItem): number {
+  if (a.updated_at < b.updated_at) return -1;
+  if (a.updated_at > b.updated_at) return 1;
+  if (a.card_id < b.card_id) return -1;
+  if (a.card_id > b.card_id) return 1;
+  return 0;
 }
 
 function stringValue(value: unknown): string | undefined {
