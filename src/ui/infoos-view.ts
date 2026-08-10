@@ -3,9 +3,12 @@ import type { InfoOSCardCatalogItem, InfoOSCardDetail } from "../infoos/contract
 import type MarkdownCardViewerPlugin from "../main";
 import { InfoOSDownloadSession } from "./infoos-download-control";
 import { EMPTY_INFOOS_FILTERS, catalogPresentationMetadata, orderedCatalog, uniqueValues, updateAvailable, type InfoOSLocalFilters } from "./infoos-view-model";
+import { sourceSubscriptionWithSelection } from "../infoos/source-subscriptions";
+import { renderInfoOSPagination } from "./infoos-pagination";
+import { renderInfoOSSourceSubscriptionPanel } from "./infoos-source-subscriptions";
 
 export const INFOOS_VIEW_TYPE = "infoos-selective-materialization";
-type Section = "remote" | "accepted" | "offline" | "connection";
+type Section = "remote" | "sources" | "accepted" | "offline" | "connection";
 
 export class InfoOSView extends ItemView {
   private section: Section = "remote";
@@ -18,13 +21,24 @@ export class InfoOSView extends ItemView {
   private assetCardId: string | null = null;
   private busy = false;
   private status = "目录仅使用本地缓存；刷新需要你明确点击。";
+  private sourceQuery = "";
+  private sourcePlatform = "";
+  private sourceMode: "all" | "selected" = "selected";
+  private sourceDraft = new Set<string>();
+  private sourceScope = "";
+  private remotePage = 1;
+  private sourcePage = 1;
 
   constructor(leaf: WorkspaceLeaf, private readonly plugin: MarkdownCardViewerPlugin) { super(leaf); }
   getViewType(): string { return INFOOS_VIEW_TYPE; }
   getDisplayText(): string { return "InfoOS"; }
   getIcon(): string { return "database"; }
   async onOpen(): Promise<void> { this.contentEl.addClass("infoos-view-root"); this.render(); }
-  async onClose(): Promise<void> { this.contentEl.empty(); }
+  async onClose(): Promise<void> {
+    this.activeDownload?.cancel();
+    this.activeDownload = null;
+    this.contentEl.empty();
+  }
 
   private render(): void {
     const root = this.contentEl;
@@ -33,24 +47,60 @@ export class InfoOSView extends ItemView {
     header.createDiv({ cls: "infoos-title", text: "InfoOS" });
     header.createDiv({ cls: "infoos-status", text: this.status });
     if (this.activeDownload) {
-      const cancel = header.createEl("button", { text: "取消离线保存", cls: "infoos-cancel", attr: { type: "button" } });
+      const cancel = header.createEl("button", { text: "停止保存", cls: "infoos-cancel", attr: { type: "button" } });
       cancel.addEventListener("click", () => {
         this.activeDownload?.cancel();
-        this.status = "正在取消离线保存…";
+        this.status = "将停止保存且不会登记本地资产；底层传输未必能立即中断。";
         cancel.disabled = true;
       });
     }
-    const tabs = root.createDiv({ cls: "infoos-tabs" });
-    (["remote", "accepted", "offline", "connection"] as Section[]).forEach((section) => {
-      const labels: Record<Section, string> = { remote: "远端卡片", accepted: "已收下", offline: "本地离线资产", connection: "连接" };
-      const button = tabs.createEl("button", { text: labels[section], cls: section === this.section ? "is-active" : "", attr: { type: "button" } });
+    const tabs = root.createDiv({ cls: "infoos-tabs", attr: { role: "tablist", "aria-label": "InfoOS 功能分区" } });
+    (["remote", "sources", "accepted", "offline", "connection"] as Section[]).forEach((section) => {
+      const labels: Record<Section, string> = { remote: "远端卡片", sources: "信息源", accepted: "已收下", offline: "本地离线资产", connection: "连接" };
+      const active = section === this.section;
+      const button = tabs.createEl("button", { text: labels[section], cls: active ? "is-active" : "", attr: { type: "button", role: "tab", "aria-selected": String(active) } });
       button.addEventListener("click", () => { this.section = section; this.render(); });
     });
     const body = root.createDiv({ cls: "infoos-body" });
     if (this.section === "remote") this.renderRemote(body);
+    if (this.section === "sources") this.renderSources(body);
     if (this.section === "accepted") this.renderAccepted(body);
     if (this.section === "offline") this.renderOffline(body);
     if (this.section === "connection") this.renderConnection(body);
+  }
+
+  private renderSources(body: HTMLElement): void {
+    const subscription = this.plugin.getInfoOSSourceSubscription();
+    const scope = `${subscription.sourceApiBaseUrl}\u0000${subscription.vaultId}\u0000${subscription.targetFolder}`;
+    if (scope !== this.sourceScope) {
+      this.sourceScope = scope;
+      this.sourceMode = subscription.mode;
+      this.sourceDraft = new Set(subscription.selectedSourceIds);
+    }
+    renderInfoOSSourceSubscriptionPanel(body, {
+      subscription, selected: this.sourceDraft, mode: this.sourceMode, query: this.sourceQuery,
+      platform: this.sourcePlatform, busy: this.busy,
+      page: this.sourcePage,
+      onQuery: (query) => { this.sourceQuery = query; this.sourcePage = 1; this.render(); },
+      onPlatform: (platform) => { this.sourcePlatform = platform; this.sourcePage = 1; this.render(); },
+      onMode: (mode) => { this.sourceMode = mode; this.render(); },
+      onToggle: (id, checked) => { checked ? this.sourceDraft.add(id) : this.sourceDraft.delete(id); this.render(); },
+      onSelectVisible: (ids) => { ids.forEach((id) => this.sourceDraft.add(id)); this.render(); },
+      onClear: () => { this.sourceDraft.clear(); this.render(); },
+      onPage: (page) => { this.sourcePage = page; this.render(); },
+      onRefresh: () => void this.run(() => this.plugin.refreshInfoOSSources()),
+      onSave: () => void this.run(async () => {
+        await this.plugin.saveInfoOSSourceSubscription(sourceSubscriptionWithSelection(subscription, this.sourceMode, [...this.sourceDraft]));
+        this.selected.clear();
+        this.transientResults = null;
+        this.queriedItems.clear();
+        this.remotePage = 1;
+        this.section = "remote";
+        return this.sourceMode === "selected" && this.sourceDraft.size === 0
+          ? "已保存空选择；远端卡片不会请求目录。请先刷新并选择信息源。"
+          : "信息源选择已保存，旧目录已失效。请刷新远端卡片；不会删除已有 Markdown 或本地资产。";
+      })
+    });
   }
 
   private renderRemote(body: HTMLElement): void {
@@ -62,16 +112,19 @@ export class InfoOSView extends ItemView {
     input.value = this.filters.query;
     input.addEventListener("change", () => {
       this.filters.query = input.value;
+      this.remotePage = 1;
       this.render();
     });
-    this.addSelect(controls, "平台", uniqueValues(all.map((card) => card.source_platform)), this.filters.platform, (value) => { this.filters.platform = value; this.render(); });
-    this.addSelect(controls, "完整度", uniqueValues(all.map((card) => card.completeness_status)), this.filters.completeness, (value) => { this.filters.completeness = value; this.render(); });
-    this.addSelect(controls, "媒体", ["image", "video", "audio", "other"], this.filters.mediaKind, (value) => { this.filters.mediaKind = value; this.render(); });
+    this.addSelect(controls, "平台", uniqueValues(all.map((card) => card.source_platform)), this.filters.platform, (value) => { this.filters.platform = value; this.remotePage = 1; this.render(); });
+    this.addSelect(controls, "完整度", uniqueValues(all.map((card) => card.completeness_status)), this.filters.completeness, (value) => { this.filters.completeness = value; this.remotePage = 1; this.render(); });
+    this.addSelect(controls, "媒体", ["image", "video", "audio", "other"], this.filters.mediaKind, (value) => { this.filters.mediaKind = value; this.remotePage = 1; this.render(); });
+    const subscription = this.plugin.getInfoOSSourceSubscription();
+    const needsSources = subscription.mode === "selected" && subscription.selectedSourceIds.length === 0;
     const refresh = controls.createEl("button", { text: this.busy ? "处理中…" : "刷新目录", cls: "mod-cta", attr: { type: "button" } });
-    refresh.disabled = this.busy;
+    refresh.disabled = this.busy || needsSources;
     refresh.addEventListener("click", () => void this.run(() => this.plugin.refreshInfoOSCatalog()));
     const remoteQuery = controls.createEl("button", { text: this.busy ? "处理中…" : "远端查询", attr: { type: "button" } });
-    remoteQuery.disabled = this.busy;
+    remoteQuery.disabled = this.busy || needsSources;
     remoteQuery.addEventListener("click", () => void this.run(async () => {
       this.transientResults = await this.plugin.queryInfoOSCatalog(this.filters);
       for (const card of this.transientResults) this.queriedItems.set(card.card_id, card);
@@ -81,6 +134,13 @@ export class InfoOSView extends ItemView {
       const reset = controls.createEl("button", { text: "返回缓存", attr: { type: "button" } });
       reset.disabled = this.busy;
       reset.addEventListener("click", () => { this.transientResults = null; this.status = "已返回本地目录缓存。"; this.render(); });
+    }
+    if (needsSources) {
+      const empty = body.createDiv({ cls: "infoos-empty" });
+      empty.createEl("p", { text: "当前是“仅选中信息源”，但尚未选择任何信息源。请先刷新并选择信息源，再刷新远端卡片。" });
+      const sources = empty.createEl("button", { text: "前往信息源", cls: "mod-cta", attr: { type: "button" } });
+      sources.addEventListener("click", () => { this.section = "sources"; this.render(); });
+      return;
     }
     const cards = this.transientResults ?? (scopeCurrent ? orderedCatalog(state, this.filters) : []);
     const action = body.createDiv({ cls: "infoos-actionbar" });
@@ -97,7 +157,9 @@ export class InfoOSView extends ItemView {
     }));
     if (!cards.length) { body.createDiv({ cls: "infoos-empty", text: this.transientResults ? "远端查询没有结果。可返回缓存继续本地筛选。" : !scopeCurrent && state.catalog?.order.length ? "现有缓存属于其他 API、Vault 或目标文件夹，不会在当前范围展示。" : all.length ? "没有符合当前本地筛选的卡片。" : "尚无缓存目录。点击“刷新目录”后才会请求 InfoOS。" }); return; }
     const list = body.createDiv({ cls: "infoos-card-list" });
-    cards.forEach((card) => this.renderRemoteCard(list, card));
+    const page = renderInfoOSPagination(body, cards.length, this.remotePage, (next) => { this.remotePage = next; this.render(); });
+    this.remotePage = page.page;
+    cards.slice(page.start, page.end).forEach((card) => this.renderRemoteCard(list, card));
   }
 
   private renderRemoteCard(parent: HTMLElement, card: InfoOSCardCatalogItem): void {
@@ -111,7 +173,8 @@ export class InfoOSView extends ItemView {
     content.createDiv({ cls: "infoos-meta", text: catalogPresentationMetadata(card).join(" · ") });
     if (card.excerpt) content.createDiv({ cls: "infoos-excerpt", text: card.excerpt });
     if (entry) content.createDiv({ cls: updateAvailable(entry, card) ? "infoos-badge is-update" : "infoos-badge", text: updateAvailable(entry, card) ? "有更新" : "已收下" });
-    this.externalLink(row, "在 InfoOS 打开", this.plugin.getInfoOSCardDeepLink(card.card_id));
+    const link = this.plugin.getInfoOSCardDeepLink(card.card_id);
+    if (link) this.externalLink(row, "在 InfoOS 打开", link);
   }
 
   private renderAccepted(body: HTMLElement): void {
@@ -129,7 +192,8 @@ export class InfoOSView extends ItemView {
       content.createDiv({ cls: !remote ? "infoos-badge is-missing" : updateAvailable(entry, remote) ? "infoos-badge is-update" : "infoos-badge", text: !remote ? "当前缓存未找到（本地保留）" : updateAvailable(entry, remote) ? "有更新" : "已是最新" });
       if (remote && updateAvailable(entry, remote)) this.button(row, "更新", () => this.run(() => this.plugin.updateInfoOSCards([entry.cardId])));
       if (remote) {
-        this.externalLink(row, "在 InfoOS 打开", this.plugin.getInfoOSCardDeepLink(entry.cardId));
+        const link = this.plugin.getInfoOSCardDeepLink(entry.cardId);
+        if (link) this.externalLink(row, "在 InfoOS 打开", link);
         this.button(row, this.assetCardId === entry.cardId ? "收起资产" : "管理资产", async () => {
           if (this.assetCardId === entry.cardId) {
             this.assetCardId = null;
@@ -190,11 +254,8 @@ export class InfoOSView extends ItemView {
           offline ? `已保存：${offline.path}` : null
         ].filter(Boolean).join(" · ")
       });
-      this.externalLink(
-        row,
-        asset.kind === "video" || asset.kind === "audio" ? "在 InfoOS 播放" : "在 InfoOS 打开",
-        this.plugin.getInfoOSAssetDeepLink(detail.card.card_id, asset.asset_id)
-      );
+      const link = this.plugin.getInfoOSAssetDeepLink(detail.card.card_id, asset.asset_id);
+      if (link) this.externalLink(row, asset.kind === "video" || asset.kind === "audio" ? "在 InfoOS 播放" : "在 InfoOS 打开", link);
       if (!offline && asset.status === "ready") {
         this.button(row, "离线保存", async () => {
           const target = this.plugin.getInfoOSOfflineAssetPath(
@@ -318,7 +379,7 @@ export class InfoOSView extends ItemView {
       download.complete();
     } catch (error) {
       this.status = download.phase === "cancelled"
-        ? "已取消离线保存，未登记本地资产。"
+        ? "已停止保存，未登记本地资产。底层传输可能已完成，无法保证立即中断。"
         : errorMessage(error);
       if (download.phase !== "cancelled") new Notice(this.status);
     } finally {

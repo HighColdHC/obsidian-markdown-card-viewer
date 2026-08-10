@@ -5,7 +5,7 @@ import { buildGraphModel, type GraphFile, type GraphModel } from "./graph-model"
 export type FolderReadModel = {
   folderPath: string;
   files: TFile[];
-  graph: GraphModel;
+  graph?: GraphModel;
 };
 
 export function markdownFilesInFolder(app: App, folderPath: string): TFile[] {
@@ -16,8 +16,9 @@ export function markdownFilesInFolder(app: App, folderPath: string): TFile[] {
     .sort((left, right) => left.stat.ctime - right.stat.ctime || left.path.localeCompare(right.path));
 }
 
-export function createFolderReadModel(app: App, folderPath: string): FolderReadModel {
+export function createFolderReadModel(app: App, folderPath: string, includeGraph = true): FolderReadModel {
   const files = markdownFilesInFolder(app, folderPath);
+  if (!includeGraph) return { folderPath, files };
   const allMarkdown = app.vault.getMarkdownFiles();
   const graphFiles = allMarkdown.map((file) => toGraphFile(app, file));
   const graph = buildGraphModel(folderPath, graphFiles, (target, sourcePath) =>

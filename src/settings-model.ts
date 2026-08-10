@@ -59,6 +59,15 @@ export const DEFAULT_SETTINGS: CardViewerSettings = {
 export function normalizeSettings(loaded: Partial<CardViewerSettings> | null): CardViewerSettings {
   const legacyState = loaded?.infoOSSyncState;
   const vaultId = normalizedVaultId(loaded?.infoOSVaultId);
+  const sourceSubscriptionDefaultMode = legacyState?.sourceSubscriptionDefaultMode
+    ?? (loaded && (
+      Boolean(loaded.infoOSBaseUrl?.trim())
+      || Boolean(loaded.infoOSToken?.trim())
+      || Boolean(legacyState?.sourceApiBaseUrl)
+      || Boolean(legacyState?.targetFolder)
+      || Boolean(legacyState?.catalog?.order.length)
+      || Boolean(Object.keys(legacyState?.entries ?? {}).length)
+    ) ? "all" : "selected");
   return {
     ...structuredClone(DEFAULT_SETTINGS),
     ...loaded,
@@ -79,7 +88,18 @@ export function normalizeSettings(loaded: Partial<CardViewerSettings> | null): C
       vaultId: legacyState?.vaultId ?? (
         legacyState?.sourceApiBaseUrl || legacyState?.targetFolder ? vaultId : null
       ),
-      targetFolder: legacyState?.targetFolder ?? null
+      targetFolder: legacyState?.targetFolder ?? null,
+      sourceSubscriptionDefaultMode,
+      sourceSubscription: legacyState?.sourceSubscription ? {
+        ...legacyState.sourceSubscription,
+        selectedSourceIds: [...new Set(legacyState.sourceSubscription.selectedSourceIds ?? [])],
+        catalog: legacyState.sourceSubscription.catalog ?? {},
+        order: legacyState.sourceSubscription.order ?? [],
+        refreshedAt: legacyState.sourceSubscription.refreshedAt ?? null,
+        sourceApiBaseUrl: legacyState.sourceSubscription.sourceApiBaseUrl ?? null,
+        vaultId: legacyState.sourceSubscription.vaultId ?? null,
+        targetFolder: legacyState.sourceSubscription.targetFolder ?? null
+      } : undefined
     }
   };
 }

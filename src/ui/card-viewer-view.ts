@@ -118,25 +118,32 @@ export class CardViewerView extends ItemView {
   }
 
   async refreshFile(file: TFile): Promise<void> {
+    await this.refreshFiles([file]);
+  }
+
+  async refreshFiles(files: readonly TFile[]): Promise<void> {
     if (!this.target) return;
     if (this.target.mode === "single") {
-      if (this.target.path === file.path) await this.renderSingle(file);
+      const current = files.find((file) => file.path === this.target!.path);
+      if (current) await this.renderSingle(current);
       return;
     }
-    const state = this.folderState(this.target.path);
-    const insideFolder = isPathInsideFolder(file.path, this.target.path);
+    const folderPath = this.target.path;
+    const state = this.folderState(folderPath);
+    const insideFolder = files.filter((file) => isPathInsideFolder(file.path, folderPath));
     if (state.layout === "graph") {
-      if (!insideFolder && !this.graphController?.containsPath(file.path)) return;
-      const model = createFolderReadModel(this.app, this.target.path);
-      this.graphController?.updateModel(model.graph);
-      if (state.selectedPath === file.path) this.renderGraphDetail?.(file.path);
+      if (!files.some((file) => isPathInsideFolder(file.path, folderPath) || this.graphController?.containsPath(file.path))) return;
+      const model = createFolderReadModel(this.app, folderPath, true);
+      if (model.graph) this.graphController?.updateModel(model.graph);
+      const selected = files.find((file) => state.selectedPath === file.path);
+      if (selected) this.renderGraphDetail?.(selected.path);
       return;
     }
     if (state.layout === "feed") {
-      if (insideFolder) this.feedController?.refreshFile(file);
+      insideFolder.forEach((file) => this.feedController?.refreshFile(file));
       return;
     }
-    if (insideFolder) this.collectionController?.refreshFile(file);
+    insideFolder.forEach((file) => this.collectionController?.refreshFile(file));
   }
 
   private rememberCurrent(push: boolean): void {
@@ -191,7 +198,7 @@ export class CardViewerView extends ItemView {
     this.contentEl.empty();
     this.applySettingsVariables();
     const state = this.folderState(folderPath);
-    const model = createFolderReadModel(this.app, folderPath);
+    const model = createFolderReadModel(this.app, folderPath, state.layout === "graph");
     if (!state.selectedPath || !model.files.some((file) => file.path === state.selectedPath)) {
       state.selectedPath = model.files[0]?.path ?? null;
     }
@@ -237,7 +244,7 @@ export class CardViewerView extends ItemView {
     this.renderScope = new Component();
     this.addChild(this.renderScope);
     if (state.layout === "graph") {
-      this.renderGraph(content, model.graph, folderPath, state);
+      if (model.graph) this.renderGraph(content, model.graph, folderPath, state);
     } else if (state.layout === "feed") {
       const controller = new FeedViewController(this.app, content, model.files, state, {
         onOpenSingle: (file) => void this.openSingle(file.path),
@@ -267,7 +274,7 @@ export class CardViewerView extends ItemView {
 
   private renderGraph(
     content: HTMLElement,
-    graph: ReturnType<typeof createFolderReadModel>["graph"],
+    graph: NonNullable<ReturnType<typeof createFolderReadModel>["graph"]>,
     _folderPath: string,
     state: FolderViewState
   ): void {
@@ -415,7 +422,7 @@ export class CardViewerView extends ItemView {
 
 function renderRelationSummary(
   container: HTMLElement,
-  graph: ReturnType<typeof createFolderReadModel>["graph"],
+  graph: NonNullable<ReturnType<typeof createFolderReadModel>["graph"]>,
   path: string
 ): void {
   const relations = graph.edges.filter((edge) => edge.source === path || edge.target === path);

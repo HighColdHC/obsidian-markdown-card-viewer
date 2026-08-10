@@ -4,6 +4,7 @@ import {
   type InfoOSCardCatalogItem,
   type InfoOSCardDetail,
   type InfoOSCatalogFilters,
+  type InfoOSCapabilities,
   type InfoOSOfflineAssetEntry,
   type InfoOSSelectiveState,
   type InfoOSSyncEntry,
@@ -19,7 +20,8 @@ export type InfoOSSyncClient = {
   listAllCards(options?: {
     pageSize?: number;
     filters?: InfoOSCatalogFilters;
-    capabilities?: readonly string[];
+    capabilities?: readonly string[] | InfoOSCapabilities;
+    sourceIds?: readonly string[];
   }, signal?: AbortSignal): Promise<InfoOSCardCatalogItem[]>;
   getCard(cardId: string, signal?: AbortSignal): Promise<InfoOSCardDetail>;
 };
@@ -90,7 +92,9 @@ export class InfoOSSyncEngine {
     options: {
       pageSize?: number;
       filters?: InfoOSCatalogFilters;
-      capabilities?: readonly string[];
+      capabilities?: readonly string[] | InfoOSCapabilities;
+      sourceIds?: readonly string[];
+      selectedSourceMode?: boolean;
       signal?: AbortSignal;
     } = {}
   ): Promise<CatalogRefreshResult> {
@@ -98,11 +102,9 @@ export class InfoOSSyncEngine {
       const normalized = normalizeScope(scope);
       const previous = normalizeState(this.getState());
       const sameScope = isSameScope(previous, normalized);
-      const cards = await this.client.listAllCards({
-        pageSize: options.pageSize,
-        filters: options.filters,
-        capabilities: options.capabilities
-      }, options.signal);
+      const cards = options.selectedSourceMode && options.sourceIds?.length === 0 ? []
+        : await this.client.listAllCards({ pageSize: options.pageSize, filters: options.filters,
+          capabilities: options.capabilities, sourceIds: options.sourceIds }, options.signal);
       const items: Record<string, InfoOSCardCatalogItem> = {};
       const order: string[] = [];
       let addedToCatalog = 0;
@@ -130,6 +132,10 @@ export class InfoOSSyncEngine {
         entries: sameScope ? { ...previous.entries } : {},
         catalog: { items, order, refreshedAt: now },
         lastCompletedAt: now,
+        sourceSubscriptionDefaultMode: previous.sourceSubscriptionDefaultMode,
+        sourceSubscription: isSourceSubscriptionForScope(previous.sourceSubscription, normalized)
+          ? cloneSourceSubscription(previous.sourceSubscription)
+          : undefined,
         ...normalized
       };
       const updateAvailable = Object.values(state.entries).filter((entry) => {
@@ -337,6 +343,7 @@ export class InfoOSSyncEngine {
       this.running = false;
     }
   }
+
 }
 
 function normalizeScope(scope: InfoOSStateScope): InfoOSStateScope {
@@ -355,6 +362,15 @@ function isSameScope(state: InfoOSSyncState, scope: InfoOSStateScope): boolean {
     && state.targetFolder === scope.targetFolder;
 }
 
+function isSourceSubscriptionForScope(
+  subscription: InfoOSSyncState["sourceSubscription"],
+  scope: InfoOSStateScope
+): boolean {
+  return subscription?.sourceApiBaseUrl === scope.sourceApiBaseUrl
+    && subscription.vaultId === scope.vaultId
+    && subscription.targetFolder === scope.targetFolder;
+}
+
 function stateForScope(
   previous: CompleteInfoOSSyncState,
   scope: InfoOSStateScope
@@ -367,13 +383,15 @@ function stateForScope(
         ...previous.catalog,
         items: { ...previous.catalog.items },
         order: [...previous.catalog.order]
-      }
+      },
+      sourceSubscription: cloneSourceSubscription(previous.sourceSubscription)
     };
   }
   return {
     entries: {},
     catalog: { ...EMPTY_INFOOS_CATALOG_CACHE, items: {}, order: [] },
     lastCompletedAt: null,
+    sourceSubscriptionDefaultMode: previous.sourceSubscriptionDefaultMode,
     ...scope
   };
 }
@@ -394,8 +412,22 @@ function normalizeState(value: InfoOSSyncState): CompleteInfoOSSyncState {
     lastCompletedAt: value.lastCompletedAt ?? null,
     sourceApiBaseUrl: value.sourceApiBaseUrl ?? null,
     vaultId: value.vaultId ?? null,
-    targetFolder: value.targetFolder ?? null
+    targetFolder: value.targetFolder ?? null,
+    sourceSubscriptionDefaultMode: value.sourceSubscriptionDefaultMode,
+    sourceSubscription: cloneSourceSubscription(value.sourceSubscription)
   };
+}
+
+function cloneSourceSubscription(
+  subscription: InfoOSSyncState["sourceSubscription"]
+): InfoOSSyncState["sourceSubscription"] {
+  return subscription ? {
+    ...subscription,
+    selectedSourceIds: [...subscription.selectedSourceIds],
+    catalog: Object.fromEntries(Object.entries(subscription.catalog)
+      .map(([sourceId, source]) => [sourceId, { ...source }])),
+    order: [...subscription.order]
+  } : undefined;
 }
 
 function assertDetailMatchesCatalog(

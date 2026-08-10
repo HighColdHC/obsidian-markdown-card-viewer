@@ -796,11 +796,17 @@
 .infoos-tabs, .infoos-controls, .infoos-actionbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .infoos-tabs { padding: 10px 24px; border-bottom: 1px solid var(--background-modifier-border); }
 .infoos-tabs button.is-active { background: var(--interactive-accent); color: var(--text-on-accent); }
+.infoos-pagination { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 12px 0; }
+.infoos-pagination button.is-active { background: var(--interactive-accent); color: var(--text-on-accent); }
 .infoos-body { overflow: auto; padding: 18px 24px 30px; }
 .infoos-controls input { flex: 1 1 220px; min-width: 160px; }
 .infoos-actionbar { margin: 14px 0; color: var(--text-muted); font-size: var(--font-ui-small); }
 .infoos-actionbar button { margin-left: auto; }
 .infoos-card-list { display: grid; gap: 8px; }
+.infoos-source-list { display: grid; gap: 8px; }
+.infoos-source-row { display: flex; align-items: start; gap: 12px; padding: 12px; border: 1px solid var(--background-modifier-border); border-radius: 8px; background: var(--background-secondary); }
+.infoos-source-mode { display: flex; gap: 14px; margin: 10px 0; color: var(--text-muted); font-size: var(--font-ui-small); }
+.infoos-source-mode label { display: inline-flex; align-items: center; gap: 5px; }
 .infoos-card-row { display: flex; align-items: start; gap: 12px; padding: 12px; border: 1px solid var(--background-modifier-border); border-radius: 8px; background: var(--background-secondary); }
 .infoos-card-row > button { margin-left: auto; flex: 0 0 auto; }
 .infoos-card-content { min-width: 0; flex: 1; }

@@ -4,7 +4,7 @@
 >
 > 日期：2026-07-30
 >
-> 状态：主链路已确认并可实现；旧全量数据的显式迁移合同待补
+> 状态：主链路与信息源订阅合同已确认；旧全量数据的显式迁移合同待补
 >
 > 取代：`2026-07-26-infoos-card-pull-requirements.md` 中“全量卡片、全部附件本地物化”的同步合同
 >
@@ -93,6 +93,7 @@ InfoOS 入口形成稳定信息卡后，插件只读取远端目录。远端卡�
 新增独立的“InfoOS”页签：
 
 - 远端卡片；
+- 信息源；
 - 已收下；
 - 本地离线资产；
 - 连接设置。
@@ -107,6 +108,16 @@ InfoOS 入口形成稳定信息卡后，插件只读取远端目录。远端卡�
 - 支持单选和多选“收下”；
 - 支持打开 InfoOS；
 - 刷新必须由用户显式触发，MVP 不定时轮询。
+
+信息源页：
+
+- 手动读取公开信息源目录；
+- 支持按名称、类型和平台在本地筛选；
+- 支持“全部信息源”或“仅选中信息源”；
+- 新安装默认为“仅选中信息源”且选择为空，选择为空时不请求卡片目录；
+- 旧安装在首次升级时保持原有的全部信息源行为；
+- 订阅选择绑定规范化服务地址、当前 Vault ID 和目标文件夹；
+- 信息源和远端卡片列表都必须窗口化展示，不得一次创建全部目录 DOM。
 
 这里的查询和过滤只作用于 InfoOS 远端目录，不为整个 Vault 增加搜索引擎，也不改变现有本地 Markdown 查看器“无复杂搜索/筛选”的边界。
 
@@ -123,6 +134,7 @@ InfoOS 入口形成稳定信息卡后，插件只读取远端目录。远端卡�
 - `GET /capabilities`
 - `GET /health`
 - `GET /cards?page_size=...&page_token=...`
+- `GET /sources?page_size=...&page_token=...`
 - `GET /cards/{card_id}`
 - `GET /assets/{asset_id}`
 
@@ -132,6 +144,11 @@ InfoOS 入口形成稳定信息卡后，插件只读取远端目录。远端卡�
 - `platform`
 - `completeness`
 - `media_kind`
+- 可重复的 `source_id`，单次最多 100 个
+
+客户端保持服务端稳定游标顺序；跨多个 `source_id` 批次合并时，使用服务端冻结的 `(updated_at, card_id)` 全局稳定顺序并按 `card_id` 去重。
+
+`GET /sources` 返回 `infoos.source-catalog.v1`，目录项至少包含：`source_id`、`display_name`、`platform`、`source_type`、`card_count`、`latest_card_updated_at`。`/capabilities` 通过 `source_schema` 和 `catalog_filters` 声明支持；只有 `web_deep_links === true` 时插件才显示 InfoOS Web 深链接，字段缺失或为 `false` 时不得猜测 Web 路由。
 
 客户端必须兼容服务端忽略新过滤参数的旧实现；在 capabilities 未声明时，不发送对应参数。
 
@@ -162,6 +179,8 @@ L0 目录缓存保存在插件配置数据中，不写入 Markdown：
 - 规范化 InfoOS 服务地址；
 - 当前 Vault ID；
 - 物化目标目录。
+
+信息源目录、订阅模式和已选 `source_id` 使用相同范围绑定。切换任一范围后不复用旧选择。
 
 切换地址、Vault 或目标目录时不能复用旧索引。
 

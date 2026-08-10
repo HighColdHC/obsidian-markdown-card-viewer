@@ -1,12 +1,18 @@
 import { MarkdownRenderChild, Menu, Notice, Plugin, TFile, TFolder, requestUrl } from "obsidian";
-import { InfoOSClient, supportsCatalogFilter, type HttpRequester } from "./infoos/client";
-import { InfoOSPluginError, type InfoOSCardCatalogItem, type InfoOSCatalogFilters } from "./infoos/contracts";
+import { InfoOSClient, supportsCatalogFilter, supportsSourceFilter, type HttpRequester } from "./infoos/client";
+import { EMPTY_INFOOS_CATALOG_CACHE, InfoOSPluginError, type InfoOSCardCatalogItem, type InfoOSCatalogFilters, type InfoOSSourceSubscription } from "./infoos/contracts";
 import {
   appendInfoOSRequestLog,
   sanitizeInfoOSRequestLogRoute,
   type InfoOSRequestLogEntry
 } from "./infoos/request-log";
 import { InfoOSSyncEngine } from "./infoos/sync-engine";
+import { InfoOSSession } from "./infoos/session";
+import {
+  defaultSourceSubscriptionMode,
+  sourceSubscriptionForScope,
+  sourceSubscriptionWithCatalog
+} from "./infoos/source-subscriptions";
 import {
   InfoOSVaultMaterializer,
   ObsidianVaultWriteAdapter,
@@ -32,6 +38,7 @@ export default class MarkdownCardViewerPlugin extends Plugin implements Settings
   private fileRefreshTimer: number | null = null;
   private readonly pendingFileRefreshes = new Map<string, TFile>();
   private infoOSRequestLog: InfoOSRequestLogEntry[] = [];
+  private readonly infoOSSession = new InfoOSSession();
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -110,9 +117,13 @@ export default class MarkdownCardViewerPlugin extends Plugin implements Settings
   }
 
   async testInfoOSConnection(): Promise<string> {
-    const result = await this.createInfoOSClient().testConnection();
-    const assets = result.capabilities.includes("assets:read") ? "，服务支持附件读取" : "";
-    return `连接成功：InfoOS ${result.interfaceVersion}，cards:read 已验证${assets}。`;
+    return await this.infoOSSession.runExclusive(async () => {
+      const client = this.createInfoOSClient();
+      const result = await client.testConnection();
+      this.rememberInfoOSCapabilities(client, await client.getCapabilities());
+      const assets = result.capabilities.includes("assets:read") ? "，服务支持附件读取" : "";
+      return `连接成功：InfoOS ${result.interfaceVersion}，cards:read 已验证${assets}。`;
+    });
   }
 
   getInfoOSRequestLog(): readonly InfoOSRequestLogEntry[] {
@@ -138,63 +149,160 @@ export default class MarkdownCardViewerPlugin extends Plugin implements Settings
   }
 
   async refreshInfoOSCatalog(): Promise<string> {
-    const client = this.createInfoOSClient();
-    const engine = this.createInfoOSEngine(client);
-    const capabilities = await client.getCapabilities();
-    const result = await engine.refreshCatalog(this.getInfoOSScope(), { capabilities: capabilities.capabilities });
-    await this.commitInfoOSState(result.state);
-    return `目录已刷新：${result.catalogCount} 张，新增 ${result.addedToCatalog}，变化 ${result.changedInCatalog}。`;
+    return await this.infoOSSession.runExclusive(async () => {
+      const client = this.createInfoOSClient();
+      const engine = this.createInfoOSEngine(client);
+      const capabilities = await client.getCapabilities();
+      this.rememberInfoOSCapabilities(client, capabilities);
+      const scope = this.getInfoOSScope();
+      const subscription = sourceSubscriptionForScope(
+        this.settings.infoOSSyncState, scope,
+        defaultSourceSubscriptionMode(this.settings.infoOSSyncState)
+      );
+      const selectedSourceMode = subscription.mode === "selected";
+      if (selectedSourceMode
+        && subscription.selectedSourceIds.length > 0
+        && !supportsSourceFilter(capabilities)) {
+        throw new InfoOSPluginError("forbidden", "当前 InfoOS 不支持按信息源筛选，已停止刷新以避免退化成全量请求。");
+      }
+      const result = await engine.refreshCatalog(scope, {
+        capabilities,
+        sourceIds: selectedSourceMode ? subscription.selectedSourceIds : undefined,
+        selectedSourceMode
+      });
+      await this.commitInfoOSState(result.state);
+      return `目录已刷新：${result.catalogCount} 张，新增 ${result.addedToCatalog}，变化 ${result.changedInCatalog}。`;
+    });
+  }
+
+  async refreshInfoOSSources(): Promise<string> {
+    return await this.infoOSSession.runExclusive(async () => {
+      const client = this.createInfoOSClient();
+      const capabilities = await client.getCapabilities();
+      this.rememberInfoOSCapabilities(client, capabilities);
+      if (!capabilities.source_schema) {
+        throw new InfoOSPluginError("forbidden", "当前 InfoOS 未声明信息源目录能力。");
+      }
+      const scope = this.getInfoOSScope();
+      const existing = sourceSubscriptionForScope(this.settings.infoOSSyncState, scope,
+        defaultSourceSubscriptionMode(this.settings.infoOSSyncState));
+      const subscription = sourceSubscriptionWithCatalog(existing, await client.listAllSources());
+      await this.commitInfoOSState({ ...this.settings.infoOSSyncState, sourceSubscription: subscription });
+      return `信息源目录已刷新：${subscription.order.length} 个；此操作不会写入 Vault。`;
+    });
+  }
+
+  getInfoOSSourceSubscription(): InfoOSSourceSubscription {
+    return sourceSubscriptionForScope(this.settings.infoOSSyncState, this.getInfoOSScope(),
+      defaultSourceSubscriptionMode(this.settings.infoOSSyncState));
+  }
+
+  async saveInfoOSSourceSubscription(subscription: InfoOSSourceSubscription): Promise<void> {
+    await this.infoOSSession.runExclusive(async () => {
+      await this.commitInfoOSState({
+        ...this.settings.infoOSSyncState,
+        catalog: { ...EMPTY_INFOOS_CATALOG_CACHE, items: {}, order: [] },
+        sourceSubscription: subscription
+      });
+    });
   }
 
   /** Explicit server-side search. Results are transient and never overwrite the scoped cache. */
   async queryInfoOSCatalog(filters: InfoOSCatalogFilters): Promise<InfoOSCardCatalogItem[]> {
     const client = this.createInfoOSClient();
     const capabilities = await client.getCapabilities();
+    this.rememberInfoOSCapabilities(client, capabilities);
     const requested: Array<[keyof InfoOSCatalogFilters, "query" | "platform" | "completeness" | "media_kind"]> = [
       ["query", "query"], ["platform", "platform"], ["completeness", "completeness"], ["mediaKind", "media_kind"]
     ];
     for (const [key, capability] of requested) {
-      if (filters[key]?.trim() && !supportsCatalogFilter(capabilities.capabilities, capability)) {
+      if (filters[key]?.trim() && !supportsCatalogFilter(capabilities, capability)) {
         throw new InfoOSPluginError("forbidden", `InfoOS 不支持远端筛选：${capability}。`);
       }
     }
     if (!Object.values(filters).some((value) => value?.trim())) {
       throw new InfoOSPluginError("invalid_config", "请至少填写一个远端查询条件。");
     }
-    return await client.listAllCards({ filters, capabilities: capabilities.capabilities });
+    const scope = this.getInfoOSScope();
+    const subscription = sourceSubscriptionForScope(
+      this.settings.infoOSSyncState, scope,
+      defaultSourceSubscriptionMode(this.settings.infoOSSyncState)
+    );
+    const selectedSourceMode = subscription.mode === "selected";
+    if (selectedSourceMode && subscription.selectedSourceIds.length === 0) return [];
+    if (selectedSourceMode && !supportsSourceFilter(capabilities)) {
+      throw new InfoOSPluginError("forbidden", "当前 InfoOS 不支持按信息源筛选，已停止查询以避免越过本地订阅范围。");
+    }
+    return await client.listAllCards({
+      filters,
+      capabilities,
+      sourceIds: selectedSourceMode ? subscription.selectedSourceIds : undefined
+    });
   }
 
   async materializeInfoOSCards(
     ids: readonly string[],
     transientCatalog: readonly InfoOSCardCatalogItem[] = []
   ): Promise<string> {
-    const client = this.createInfoOSClient();
-    const authoritativeState = this.settings.infoOSSyncState;
-    const workingState = withTransientCatalog(authoritativeState, transientCatalog);
-    const result = await this.createInfoOSEngine(client, workingState).materializeSelected(ids, this.getInfoOSScope(), {
-      cardDeepLink: (cardId) => client.buildCardDeepLink(cardId),
-      assetDeepLink: (cardId, assetId) => client.buildAssetDeepLink(cardId, assetId)
+    return await this.infoOSSession.runExclusive(async () => {
+      const client = this.createInfoOSClient();
+      const authoritativeState = this.settings.infoOSSyncState;
+      const scope = this.getInfoOSScope();
+      const subscription = sourceSubscriptionForScope(
+        authoritativeState, scope,
+        defaultSourceSubscriptionMode(authoritativeState)
+      );
+      const selectedSourceIds = new Set(subscription.selectedSourceIds);
+      if (subscription.mode === "selected" && selectedSourceIds.size === 0) {
+        throw new InfoOSPluginError("forbidden", "当前未选择任何信息源，无法收下卡片。");
+      }
+      const scopedTransientCatalog = subscription.mode === "selected"
+        ? transientCatalog.filter((card) => typeof card.source_id === "string"
+          && card.source_id.length > 0
+          && selectedSourceIds.has(card.source_id))
+        : transientCatalog;
+      const workingState = withTransientCatalog(authoritativeState, scopedTransientCatalog);
+      if (subscription.mode === "selected") {
+        for (const id of new Set(ids)) {
+          const card = workingState.catalog?.items[id];
+          if (card?.source_id == null || !selectedSourceIds.has(card.source_id)) {
+            throw new InfoOSPluginError("forbidden", `卡片 ${id} 不属于当前选中的信息源，无法收下。`);
+          }
+        }
+      }
+      const result = await this.createInfoOSEngine(client, workingState).materializeSelected(ids, scope, {
+        ...(this.infoOSSession.webDeepLinksEnabled(client.getApiBaseUrl()) ? {
+          cardDeepLink: (cardId: string) => client.buildCardDeepLink(cardId),
+          assetDeepLink: (cardId: string, assetId: string) => client.buildAssetDeepLink(cardId, assetId)
+        } : {})
+      });
+      if (workingState !== authoritativeState) {
+        result.state = restoreAuthoritativeCatalog(result.state, authoritativeState);
+      }
+      await this.commitInfoOSState(result.state);
+      return result.failed ? `已收下 ${result.created} 张，失败 ${result.failed}。` : `已收下 ${result.created} 张。`;
     });
-    if (workingState !== authoritativeState) {
-      result.state = restoreAuthoritativeCatalog(result.state, authoritativeState);
-    }
-    await this.commitInfoOSState(result.state);
-    return result.failed ? `已收下 ${result.created} 张，失败 ${result.failed}。` : `已收下 ${result.created} 张。`;
   }
 
   async updateInfoOSCards(ids: readonly string[]): Promise<string> {
-    const client = this.createInfoOSClient();
-    const result = await this.createInfoOSEngine(client).updateSelected(ids, this.getInfoOSScope(), {
-      cardDeepLink: (cardId) => client.buildCardDeepLink(cardId),
-      assetDeepLink: (cardId, assetId) => client.buildAssetDeepLink(cardId, assetId)
+    return await this.infoOSSession.runExclusive(async () => {
+      const client = this.createInfoOSClient();
+      const result = await this.createInfoOSEngine(client).updateSelected(ids, this.getInfoOSScope(), {
+        ...(this.infoOSSession.webDeepLinksEnabled(client.getApiBaseUrl()) ? {
+          cardDeepLink: (cardId: string) => client.buildCardDeepLink(cardId),
+          assetDeepLink: (cardId: string, assetId: string) => client.buildAssetDeepLink(cardId, assetId)
+        } : {})
+      });
+      await this.commitInfoOSState(result.state);
+      return result.failed ? `已更新 ${result.updated} 张，失败 ${result.failed}。` : `已更新 ${result.updated} 张。`;
     });
-    await this.commitInfoOSState(result.state);
-    return result.failed ? `已更新 ${result.updated} 张，失败 ${result.failed}。` : `已更新 ${result.updated} 张。`;
   }
 
   async stopTrackingInfoOSCards(ids: readonly string[]): Promise<void> {
-    const state = this.createInfoOSEngine(this.createInfoOSClient()).stopTracking(ids, this.getInfoOSScope());
-    await this.commitInfoOSState(state);
+    await this.infoOSSession.runExclusive(async () => {
+      const state = this.createInfoOSEngine(this.createInfoOSClient()).stopTracking(ids, this.getInfoOSScope());
+      await this.commitInfoOSState(state);
+    });
   }
 
   createInfoOSMaterializer(): InfoOSVaultMaterializer {
@@ -256,6 +364,13 @@ export default class MarkdownCardViewerPlugin extends Plugin implements Settings
 
   private recordInfoOSRequest(entry: InfoOSRequestLogEntry): void {
     this.infoOSRequestLog = appendInfoOSRequestLog(this.infoOSRequestLog, entry);
+  }
+
+  private rememberInfoOSCapabilities(
+    client: InfoOSClient,
+    capabilities: Awaited<ReturnType<InfoOSClient["getCapabilities"]>>
+  ): void {
+    this.infoOSSession.rememberCapabilities(client.getApiBaseUrl(), capabilities);
   }
 
   private createInfoOSEngine(
@@ -341,7 +456,7 @@ export default class MarkdownCardViewerPlugin extends Plugin implements Settings
           const size = formatBytes(placeholder.sizeBytes);
           if (!window.confirm(`离线保存这张图片？\n大小：${size}\n目标：${target}`)) return;
           download = new InfoOSDownloadSession();
-          button.setText("取消离线保存");
+          button.setText("停止保存");
           void this.saveInfoOSAsset(cardId, placeholder.assetId, download, () => {
             button.disabled = true;
             button.setText("正在登记…");
@@ -368,12 +483,18 @@ export default class MarkdownCardViewerPlugin extends Plugin implements Settings
     return await this.createInfoOSClient().getCard(cardId);
   }
 
-  getInfoOSCardDeepLink(cardId: string): string {
-    return this.createInfoOSClient().buildCardDeepLink(cardId);
+  getInfoOSCardDeepLink(cardId: string): string | null {
+    const client = this.createInfoOSClient();
+    return this.infoOSSession.webDeepLinksEnabled(client.getApiBaseUrl())
+      ? client.buildCardDeepLink(cardId)
+      : null;
   }
 
-  getInfoOSAssetDeepLink(cardId: string, assetId: string): string {
-    return this.createInfoOSClient().buildAssetDeepLink(cardId, assetId);
+  getInfoOSAssetDeepLink(cardId: string, assetId: string): string | null {
+    const client = this.createInfoOSClient();
+    return this.infoOSSession.webDeepLinksEnabled(client.getApiBaseUrl())
+      ? client.buildAssetDeepLink(cardId, assetId)
+      : null;
   }
 
   getInfoOSOfflineAssetPath(cardId: string, assetId: string, contentHash: string, mimeType: string): string {
@@ -391,51 +512,55 @@ export default class MarkdownCardViewerPlugin extends Plugin implements Settings
     download: InfoOSDownloadSession,
     onCommitStart: () => void
   ): Promise<void> {
-    const client = this.createInfoOSClient();
-    const signal = download.signal;
-    throwIfAborted(signal);
-    const detail = await client.getCard(cardId, signal);
-    const asset = detail.assets.find((candidate) => candidate.asset_id === assetId);
-    const record = this.settings.infoOSSyncState.entries[cardId];
-    if (!asset || !record) {
-      throw new InfoOSPluginError("not_found", "找不到可保存的 InfoOS 附件。");
-    }
-    assertDownloadMayCommit(signal);
-    const bytes = await client.getAsset(asset.url, signal);
-    assertDownloadMayCommit(signal);
-    if (!download.beginCommit()) {
-      throw new InfoOSPluginError("cancelled", "InfoOS 离线保存未进入提交阶段。");
-    }
-    onCommitStart();
-    // From here the UI has removed the cancel control. The local writes and
-    // settings registration form one non-cancellable commit phase.
-    const saved = await this.createInfoOSMaterializer().saveOfflineAsset({
-      cardId,
-      markdownPath: record.markdownPath,
-      targetFolder: this.settings.infoOSTargetFolder,
-      asset,
-      bytes,
-      registeredAssetIds: detail.assets.map((candidate) => candidate.asset_id)
+    await this.infoOSSession.runExclusive(async () => {
+      const client = this.createInfoOSClient();
+      const signal = download.signal;
+      throwIfAborted(signal);
+      const detail = await client.getCard(cardId, signal);
+      const asset = detail.assets.find((candidate) => candidate.asset_id === assetId);
+      const record = this.settings.infoOSSyncState.entries[cardId];
+      if (!asset || !record) {
+        throw new InfoOSPluginError("not_found", "找不到可保存的 InfoOS 附件。");
+      }
+      assertDownloadMayCommit(signal);
+      const bytes = await client.getAsset(asset.url, signal);
+      assertDownloadMayCommit(signal);
+      if (!download.beginCommit()) {
+        throw new InfoOSPluginError("cancelled", "InfoOS 离线保存未进入提交阶段。");
+      }
+      onCommitStart();
+      // From here the UI has removed the cancel control. The local writes and
+      // settings registration form one non-cancellable commit phase.
+      const saved = await this.createInfoOSMaterializer().saveOfflineAsset({
+        cardId,
+        markdownPath: record.markdownPath,
+        targetFolder: this.settings.infoOSTargetFolder,
+        asset,
+        bytes,
+        registeredAssetIds: detail.assets.map((candidate) => candidate.asset_id)
+      });
+      const state = this.createInfoOSEngine(client).registerOfflineAsset(
+        cardId,
+        saved,
+        this.getInfoOSScope()
+      );
+      await this.commitInfoOSState(state);
     });
-    const state = this.createInfoOSEngine(client).registerOfflineAsset(
-      cardId,
-      saved,
-      this.getInfoOSScope()
-    );
-    await this.commitInfoOSState(state);
   }
 
   async removeInfoOSAsset(cardId: string, assetId: string): Promise<void> {
-    const client = this.createInfoOSClient();
-    const record = this.settings.infoOSSyncState.entries[cardId];
-    const entry = record?.offlineAssets[assetId];
-    if (!record || !entry) throw new InfoOSPluginError("not_found", "找不到已登记的本地附件。");
-    await this.createInfoOSMaterializer().removeRegisteredAsset({
-      cardId, markdownPath: record.markdownPath, targetFolder: this.settings.infoOSTargetFolder,
-      entry, registeredAssets: record.offlineAssets
+    await this.infoOSSession.runExclusive(async () => {
+      const client = this.createInfoOSClient();
+      const record = this.settings.infoOSSyncState.entries[cardId];
+      const entry = record?.offlineAssets[assetId];
+      if (!record || !entry) throw new InfoOSPluginError("not_found", "找不到已登记的本地附件。");
+      await this.createInfoOSMaterializer().removeRegisteredAsset({
+        cardId, markdownPath: record.markdownPath, targetFolder: this.settings.infoOSTargetFolder,
+        entry, registeredAssets: record.offlineAssets
+      });
+      const state = this.createInfoOSEngine(client).unregisterOfflineAsset(cardId, assetId, this.getInfoOSScope());
+      await this.commitInfoOSState(state);
     });
-    const state = this.createInfoOSEngine(client).unregisterOfflineAsset(cardId, assetId, this.getInfoOSScope());
-    await this.commitInfoOSState(state);
   }
 
   private requestRefresh(): void {
@@ -455,7 +580,7 @@ export default class MarkdownCardViewerPlugin extends Plugin implements Settings
       this.pendingFileRefreshes.clear();
       for (const leaf of this.app.workspace.getLeavesOfType(CARD_VIEW_TYPE)) {
         if (!(leaf.view instanceof CardViewerView)) continue;
-        for (const changed of files) void leaf.view.refreshFile(changed);
+        void leaf.view.refreshFiles(files);
       }
     }, 180);
   }
